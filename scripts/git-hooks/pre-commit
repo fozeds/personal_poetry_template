@@ -1,10 +1,8 @@
 #!/bin/sh
 
-# scripts/pre_commit.sh
-
 # Executa o script que bloqueia commits na main ou master
-python3 scripts/block_branch.py
+python3 scripts/block_branch.py || exit 1
 
 # Se não bloqueado, adiciona os arquivos modificados
-python3 scripts/add_repo_path_header.py
+python3 scripts/add_repo_path_header.py || exit 1
 git add -u
