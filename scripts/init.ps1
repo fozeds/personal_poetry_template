@@ -106,12 +106,6 @@ Write-Host "Instalando dependências com poetry install..."
 & $PoetryExe install
 
 # =========================================
-# Pre-commit
-# =========================================
-Write-Host "Instalando hooks do pre-commit..."
-& $PoetryExe run pre-commit install
-
-# =========================================
 # Ativa ambiente virtual
 # =========================================
 Write-Host "Tentando ativar ambiente virtual do Poetry..."
