@@ -1,180 +1,313 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # scripts/init.sh
 # encoding: utf-8
 
-echo "Iniciando setup do ambiente..."
+########################################
+# Strict Mode
+########################################
 
-# =========================================
-# Vai para a raiz do projeto
-# =========================================
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT=$(realpath "$SCRIPT_DIR/..")
-cd "$PROJECT_ROOT" || exit 1
+set -Euo pipefail
 
-echo "Diretório do projeto: $PROJECT_ROOT"
+########################################
+# Metadata
+########################################
+# namespace: project.scripts.init
 
-# =========================================
-# Configuração do Poetry (Linux/MacOS)
-# =========================================
-POETRY_BIN_PATH="$HOME/.local/bin"
-POETRY_EXE="$POETRY_BIN_PATH/poetry"
+########################################
+# Runtime Flags
+########################################
 
-function test_poetry {
-    test -f "$POETRY_EXE"
+DEBUG_MODE="${DEBUG_MODE:-false}"
+
+if [[ "$DEBUG_MODE" == "true" ]]; then
+    set -x
+fi
+
+########################################
+# Detect source vs execution
+########################################
+
+function runtime.is_sourced() {
+    [[ "${BASH_SOURCE[0]}" != "${0}" ]]
 }
 
-# =========================================
-# Instala Poetry se necessário
-# =========================================
-if ! test_poetry; then
-    echo "Poetry não encontrado. Instalando..."
+########################################
+# Safe Exit
+########################################
+
+function runtime.safe_exit() {
+    local code="${1:-0}"
+
+    if runtime.is_sourced; then
+        return "$code"
+    else
+        exit "$code"
+    fi
+}
+
+########################################
+# Logger
+########################################
+
+function logger.timestamp() {
+    date +"%Y-%m-%d %H:%M:%S"
+}
+
+function logger.info() {
+    echo "[INFO]  $(logger.timestamp) | $1"
+}
+
+function logger.warn() {
+    echo "[WARN]  $(logger.timestamp) | $1"
+}
+
+function logger.error() {
+    echo "[ERROR] $(logger.timestamp) | $1" >&2
+}
+
+########################################
+# Stacktrace
+########################################
+
+function runtime.stacktrace() {
+    logger.error "Stacktrace:"
+
+    local i
+    for ((i = 1; i < ${#FUNCNAME[@]}; i++)); do
+        logger.error "  at ${FUNCNAME[$i]} (${BASH_SOURCE[$i]}:${BASH_LINENO[$((i - 1))]})"
+    done
+}
+
+########################################
+# Error Trap
+########################################
+
+function runtime.on_error() {
+    local exit_code=$?
+    runtime.stacktrace
+    logger.error "Script aborted with exit code ${exit_code}"
+    runtime.safe_exit "$exit_code"
+}
+
+trap runtime.on_error ERR
+
+########################################
+# Resolve project root (portable)
+########################################
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+cd "$PROJECT_ROOT"
+
+logger.info "Project root: $PROJECT_ROOT"
+
+########################################
+# System Dependency Validator
+########################################
+
+function system.require_command() {
+    local cmd="$1"
+
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+        logger.error "Required command not found: $cmd"
+        runtime.safe_exit 1
+    fi
+}
+
+########################################
+# Validate base dependencies
+########################################
+
+function system.validate_base_dependencies() {
+    system.require_command curl
+    system.require_command python3
+}
+
+system.validate_base_dependencies
+
+########################################
+# Poetry Handling
+########################################
+
+POETRY_BIN_PATH="$HOME/.local/bin"
+
+function poetry.exists() {
+    command -v poetry >/dev/null 2>&1
+}
+
+function poetry.ensure_path() {
+    export PATH="$POETRY_BIN_PATH:$PATH"
+}
+
+function poetry.install() {
+
+    logger.info "Installing Poetry..."
 
     curl -sSL https://install.python-poetry.org | python3 -
 
-    if ! test -d "$POETRY_BIN_PATH"; then
-        mkdir -p "$POETRY_BIN_PATH"
+    poetry.ensure_path
+
+    if ! poetry.exists; then
+        logger.error "Poetry installation failed"
+        runtime.safe_exit 1
+    fi
+}
+
+function poetry.ensure_installed() {
+
+    if poetry.exists; then
+        return
     fi
 
-    if ! echo "$PATH" | grep -q "$POETRY_BIN_PATH"; then
-        echo "Adicionando Poetry ao PATH..."
-        echo "export PATH=\"$POETRY_BIN_PATH:\$PATH\"" >> "$HOME/.bashrc"
-        source "$HOME/.bashrc"
-    fi
+    poetry.install
+}
 
-    echo "Poetry instalado com sucesso."
-fi
+poetry.ensure_installed
 
-# Garante que o Poetry esteja no PATH da sessão atual
-if ! echo "$PATH" | grep -q "$POETRY_BIN_PATH"; then
-    export PATH="$POETRY_BIN_PATH:$PATH"
-fi
+########################################
+# Project Files
+########################################
 
-# =========================================
-# Arquivos do projeto
-# =========================================
 PYPROJECT_PATH="$PROJECT_ROOT/pyproject.toml"
 REQUIREMENTS_PATH="$PROJECT_ROOT/requirements.txt"
 
-# =========================================
-# Cria pyproject.toml se não existir
-# =========================================
-if [ ! -f "$PYPROJECT_PATH" ]; then
-    echo "pyproject.toml não encontrado."
+########################################
+# Ensure pyproject
+########################################
 
-    read -p "Deseja criar um pyproject.toml agora? (s/n): " answer
+function project.ensure_pyproject() {
+
+    if [[ -f "$PYPROJECT_PATH" ]]; then
+        return
+    fi
+
+    logger.warn "pyproject.toml not found"
+
+    read -rp "Create pyproject.toml now? (s/n): " answer
 
     if [[ "$answer" =~ ^[sS]$ ]]; then
-        echo "Iniciando poetry init..."
-        poetry init -n
+        poetry init -n --author "Richard <fozeds@github.com>"
     else
-        echo "Setup interrompido pelo usuário."
-        exit 0
+        logger.warn "User cancelled setup"
+        runtime.safe_exit 0
     fi
-fi
+}
 
-# =========================================
-# Configura Poetry para NÃO pacote
-# =========================================
-echo "Configurando Poetry (package-mode = false)..."
-poetry config --local package-mode false
+project.ensure_pyproject
 
-# =========================================
-# Configura venv dentro do projeto
-# =========================================
-poetry config virtualenvs.in-project true
+########################################
+# Configure Poetry
+########################################
 
-# =========================================
-# Importa requirements.txt se existir
-# =========================================
-if [ -f "$REQUIREMENTS_PATH" ]; then
-    echo "requirements.txt encontrado. Importando dependências..."
+function poetry.configure() {
+    poetry config virtualenvs.in-project true --local
+}
+
+poetry.configure
+
+########################################
+# Install Dependencies
+########################################
+
+function poetry.install_dependencies() {
+    logger.info "Running poetry install..."
+    poetry install
+}
+
+poetry.install_dependencies
+
+########################################
+# Import requirements.txt
+########################################
+
+function poetry.import_requirements() {
+
+    if [[ ! -f "$REQUIREMENTS_PATH" ]]; then
+        return
+    fi
+
+    logger.info "Importing requirements.txt"
 
     while IFS= read -r line; do
-        # Ignora linhas em branco ou comentários
-        if [[ ! "$line" =~ ^#.* && -n "$line" ]]; then
-            poetry add "$line"
-        fi
+        [[ -z "$line" || "$line" =~ ^# ]] && continue
+        poetry add "$line"
     done < "$REQUIREMENTS_PATH"
-fi
+}
 
-# =========================================
-# Instala dependências
-# =========================================
-echo "Instalando dependências com poetry install..."
-poetry install
+poetry.import_requirements
 
-# =========================================
-# Ativa ambiente virtual
-# =========================================
-echo "Tentando ativar ambiente virtual do Poetry..."
+########################################
+# Activate Virtualenv
+########################################
 
-VENV_PATH=$(poetry env info --path)
+function poetry.activate_virtualenv() {
 
-if [ -n "$VENV_PATH" ]; then
-    ACTIVATE_SCRIPT="$VENV_PATH/bin/activate"
+    local venv_path
+    venv_path="$(poetry env info --path)"
 
-    if [ -f "$ACTIVATE_SCRIPT" ]; then
-        echo "Ativando venv: $VENV_PATH"
-        source "$ACTIVATE_SCRIPT"
-        echo "Ambiente virtual ativado no terminal atual."
+    if [[ -z "$venv_path" ]]; then
+        logger.error "Virtualenv not found"
+        return
+    fi
+
+    local activate_script="$venv_path/bin/activate"
+
+    if [[ ! -f "$activate_script" ]]; then
+        logger.error "Activate script not found"
+        return
+    fi
+
+    if runtime.is_sourced; then
+        logger.info "Activating virtualenv"
+        # shellcheck disable=SC1090
+        source "$activate_script"
+        logger.info "Virtualenv activated"
     else
-        echo "Script de ativação não encontrado."
+        logger.info "Run using: source scripts/init.sh to activate virtualenv"
     fi
-else
-    echo "Não foi possível encontrar o ambiente virtual."
-fi
+}
 
-# =========================================
-# Git Hooks (local repository only)
-# =========================================
-echo "Configurando Git hooks locais..."
+poetry.activate_virtualenv
 
-GIT_DIR="$PROJECT_ROOT/.git"
-SOURCE_HOOKS_DIR="$PROJECT_ROOT/scripts/git-hooks"
-TARGET_HOOKS_DIR="$GIT_DIR/hooks"
+########################################
+# Git Hooks
+########################################
 
-if [ ! -d "$GIT_DIR" ]; then
-    echo ".git não encontrado."
-    echo "Este projeto ainda não é um repositório Git."
-    echo "Execute 'git init' e rode novamente este script (init.sh)."
-    exit 1
-fi
+function git.setup_hooks() {
 
-if [ ! -d "$SOURCE_HOOKS_DIR" ]; then
-    echo "Diretório de hooks não encontrado: $SOURCE_HOOKS_DIR"
-    echo "Nenhum hook foi instalado."
-    exit 1
-fi
+    local git_dir="$PROJECT_ROOT/.git"
+    local source_hooks="$PROJECT_ROOT/scripts/git-hooks"
+    local target_hooks="$git_dir/hooks"
 
-if [ ! -d "$TARGET_HOOKS_DIR" ]; then
-    echo "Criando diretório de hooks do Git..."
-    mkdir -p "$TARGET_HOOKS_DIR"
-fi
-
-# Copia hooks
-for HOOK in "$SOURCE_HOOKS_DIR"/*; do
-    if [ -f "$HOOK" ]; then
-        TARGET_PATH="$TARGET_HOOKS_DIR/$(basename "$HOOK")"
-
-        if [ -f "$TARGET_PATH" ]; then
-            echo "Sobrescrevendo hook existente: $(basename "$HOOK")"
-        else
-            echo "Instalando hook: $(basename "$HOOK")"
-        fi
-
-        cp "$HOOK" "$TARGET_PATH"
+    if [[ ! -d "$git_dir" ]]; then
+        logger.warn "Git repository not found"
+        return
     fi
-done
 
-# Tenta marcar hooks como executáveis (Linux/MacOS)
-if command -v chmod &>/dev/null; then
-    echo "Marcando hooks como executáveis (chmod +x)..."
-    chmod +x "$TARGET_HOOKS_DIR"/*
-else
-    echo "chmod não disponível. Ignorando ajuste de permissão."
-    echo "No Git Bash ou sistemas Linux/Mac, isso normalmente não é um problema."
-fi
+    if [[ ! -d "$source_hooks" ]]; then
+        logger.warn "No git hooks directory"
+        return
+    fi
 
-echo "Git hooks configurados com sucesso."
+    mkdir -p "$target_hooks"
 
-echo "Setup concluído com sucesso."
+    for hook in "$source_hooks"/*; do
+        [[ -f "$hook" ]] || continue
+
+        local target="$target_hooks/$(basename "$hook")"
+
+        cp "$hook" "$target"
+        chmod +x "$target"
+    done
+
+    logger.info "Git hooks configured"
+}
+
+git.setup_hooks
+
+########################################
+# Finish
+########################################
+
+logger.info "Setup completed successfully"
