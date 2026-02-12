@@ -1,192 +1,297 @@
 # scripts/init.ps1
 # encoding: utf-8
+# namespace: project.scripts.init
 
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
 
-Write-Host "Iniciando setup do ambiente..."
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
 
 # =========================================
-# Vai para a raiz do projeto
+# Runtime Flags
 # =========================================
-$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$ProjectRoot = Resolve-Path "$ScriptDir\.."
-Set-Location $ProjectRoot
 
-Write-Host "Diretório do projeto: $ProjectRoot"
+if (-not $env:DEBUG_MODE) {
+    $env:DEBUG_MODE = "false"
+}
 
-# =========================================
-# Configuração do Poetry (Windows)
-# =========================================
-$PoetryBinPath = "$env:APPDATA\Python\Scripts"
-$PoetryExe = "$PoetryBinPath\poetry.exe"
-
-function Test-Poetry {
-    Test-Path $PoetryExe
+if ($env:DEBUG_MODE -eq "true") {
+    Set-PSDebug -Trace 1
 }
 
 # =========================================
-# Instala Poetry se necessário
+# Runtime Helpers
 # =========================================
-if (-not (Test-Poetry)) {
-    Write-Host "Poetry não encontrado. Instalando..."
 
-    try {
-        Invoke-WebRequest -Uri https://install.python-poetry.org -UseBasicParsing |
-            Select-Object -ExpandProperty Content |
-            py -
+function Runtime:IsDotSourced {
+    return ($MyInvocation.InvocationName -eq '.')
+}
 
-        if (-not ($env:Path -like "*$PoetryBinPath*")) {
-            $env:Path += ";$PoetryBinPath"
-        }
-
-        Write-Host "Poetry instalado com sucesso."
-    } catch {
-        Write-Error "Falha ao instalar Poetry: $_"
-        exit 1
+function Runtime:SafeExit([int]$Code = 0) {
+    if (Runtime:IsDotSourced) {
+        return
+    }
+    else {
+        exit $Code
     }
 }
 
-# Garante PATH na sessão atual
-if (-not ($env:Path -like "*$PoetryBinPath*")) {
-    $env:Path += ";$PoetryBinPath"
+# =========================================
+# Logger
+# =========================================
+
+function Logger:Timestamp {
+    return (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+}
+
+function Logger:Info($Message) {
+    Write-Host "[INFO ] $(Logger:Timestamp) | $Message"
+}
+
+function Logger:Warn($Message) {
+    Write-Warning "[WARN ] $(Logger:Timestamp) | $Message"
+}
+
+function Logger:Error($Message) {
+    Write-Error "[ERROR] $(Logger:Timestamp) | $Message"
 }
 
 # =========================================
-# Arquivos do projeto
+# Stacktrace
 # =========================================
-$PyprojectPath   = Join-Path $ProjectRoot "pyproject.toml"
+
+function Runtime:Stacktrace {
+    Logger:Error "Stacktrace:"
+    Get-PSCallStack | ForEach-Object {
+        Logger:Error "  at $($_.Command) ($($_.Location))"
+    }
+}
+
+# =========================================
+# Error Trap
+# =========================================
+
+trap {
+    Runtime:Stacktrace
+    Logger:Error $_
+    Runtime:SafeExit 1
+}
+
+# =========================================
+# Resolve Project Root
+# =========================================
+
+$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$ProjectRoot = Resolve-Path (Join-Path $ScriptDir "..")
+Set-Location $ProjectRoot
+
+Logger:Info "Project root: $ProjectRoot"
+
+# =========================================
+# Dependency Validation
+# =========================================
+
+function System:RequireCommand($Command) {
+
+    if (-not (Get-Command $Command -ErrorAction SilentlyContinue)) {
+        Logger:Error "Required command not found: $Command"
+        Runtime:SafeExit 1
+    }
+}
+
+function System:ValidateBaseDependencies {
+    System:RequireCommand "python"
+    System:RequireCommand "Invoke-WebRequest"
+}
+
+System:ValidateBaseDependencies
+
+# =========================================
+# Poetry Handling
+# =========================================
+
+$PoetryBinPath = "$env:APPDATA\Python\Scripts"
+$PoetryExe = Join-Path $PoetryBinPath "poetry.exe"
+
+function Poetry:Exists {
+    return (Test-Path $PoetryExe)
+}
+
+function Poetry:EnsurePath {
+    if ($env:Path -notlike "*$PoetryBinPath*") {
+        $env:Path += ";$PoetryBinPath"
+    }
+}
+
+function Poetry:Install {
+
+    Logger:Info "Installing Poetry..."
+
+    Invoke-WebRequest https://install.python-poetry.org -UseBasicParsing |
+        Select-Object -ExpandProperty Content |
+        py -
+
+    Poetry:EnsurePath
+
+    if (-not (Poetry:Exists)) {
+        Logger:Error "Poetry installation failed"
+        Runtime:SafeExit 1
+    }
+}
+
+function Poetry:EnsureInstalled {
+    if (-not (Poetry:Exists)) {
+        Poetry:Install
+    }
+}
+
+Poetry:EnsureInstalled
+Poetry:EnsurePath
+
+# =========================================
+# Project Files
+# =========================================
+
+$PyprojectPath = Join-Path $ProjectRoot "pyproject.toml"
 $RequirementsPath = Join-Path $ProjectRoot "requirements.txt"
 
 # =========================================
-# Cria pyproject.toml se não existir
+# Ensure pyproject
 # =========================================
-if (-not (Test-Path $PyprojectPath)) {
-    Write-Warning "pyproject.toml não encontrado."
 
-    $answer = Read-Host "Deseja criar um pyproject.toml agora? (s/n)"
+function Project:EnsurePyproject {
+
+    if (Test-Path $PyprojectPath) {
+        return
+    }
+
+    Logger:Warn "pyproject.toml not found"
+
+    $answer = Read-Host "Create pyproject.toml now? (s/n)"
 
     if ($answer -match '^[sS]') {
-        Write-Host "Iniciando poetry init..."
-        & $PoetryExe init
-    } else {
-        Write-Host "Setup interrompido pelo usuário."
-        exit 0
+        & $PoetryExe init -n
+    }
+    else {
+        Logger:Warn "User cancelled setup"
+        Runtime:SafeExit 0
     }
 }
 
-# =========================================
-# Configura Poetry para NÃO pacote
-# =========================================
-Write-Host "Configurando Poetry (package-mode = false)..."
-& $PoetryExe config --local package-mode false
+Project:EnsurePyproject
 
 # =========================================
-# Configura venv dentro do projeto
+# Configure Poetry
 # =========================================
-& $PoetryExe config virtualenvs.in-project true
 
-# =========================================
-# Importa requirements.txt se existir
-# =========================================
-if (Test-Path $RequirementsPath) {
-    Write-Host "requirements.txt encontrado. Importando dependências..."
-
-    $Requirements = Get-Content $RequirementsPath |
-        Where-Object { $_ -and -not $_.StartsWith('#') }
-
-    if ($Requirements.Count -gt 0) {
-        & $PoetryExe add $Requirements
-    }
+function Poetry:Configure {
+    & $PoetryExe config virtualenvs.in-project true --local
 }
 
-# =========================================
-# Instala dependências
-# =========================================
-Write-Host "Instalando dependências com poetry install..."
-& $PoetryExe install
+Poetry:Configure
 
 # =========================================
-# Pre-commit
+# Install Dependencies
 # =========================================
-Write-Host "Instalando hooks do pre-commit..."
-& $PoetryExe run pre-commit install
+
+function Poetry:InstallDependencies {
+    Logger:Info "Running poetry install..."
+    & $PoetryExe install
+}
+
+Poetry:InstallDependencies
 
 # =========================================
-# Ativa ambiente virtual
+# Import requirements.txt
 # =========================================
-Write-Host "Tentando ativar ambiente virtual do Poetry..."
 
-$venvPath = & $PoetryExe env info --path
+function Poetry:ImportRequirements {
 
-if ($venvPath) {
+    if (-not (Test-Path $RequirementsPath)) {
+        return
+    }
+
+    Logger:Info "Importing requirements.txt"
+
+    Get-Content $RequirementsPath |
+        Where-Object { $_ -and -not $_.StartsWith('#') } |
+        ForEach-Object {
+            & $PoetryExe add $_
+        }
+}
+
+Poetry:ImportRequirements
+
+# =========================================
+# Activate VirtualEnv
+# =========================================
+
+function Poetry:ActivateVirtualEnv {
+
+    $venvPath = & $PoetryExe env info --path
+
+    if (-not $venvPath) {
+        Logger:Error "Virtualenv not found"
+        return
+    }
+
     $activateScript = Join-Path $venvPath "Scripts\Activate.ps1"
 
-    if (Test-Path $activateScript) {
-        Write-Host "Ativando venv: $venvPath"
+    if (-not (Test-Path $activateScript)) {
+        Logger:Error "Activate script not found"
+        return
+    }
+
+    if (Runtime:IsDotSourced) {
+        Logger:Info "Activating virtualenv"
         . $activateScript
-        Write-Host "Ambiente virtual ativado no terminal atual."
-    } else {
-        Write-Warning "Script de ativação não encontrado."
+        Logger:Info "Virtualenv activated"
     }
-} else {
-    Write-Warning "Não foi possível encontrar o ambiente virtual."
+    else {
+        Logger:Info "Run using: . scripts/init.ps1 to activate virtualenv"
+    }
 }
+
+Poetry:ActivateVirtualEnv
 
 # =========================================
-# Git Hooks (local repository only)
+# Git Hooks
 # =========================================
 
-Write-Host "Configurando Git hooks locais..."
+function Git:SetupHooks {
 
-$GitDir = Join-Path $ProjectRoot ".git"
-$SourceHooksDir = Join-Path $ProjectRoot "scripts\git-hooks"
-$TargetHooksDir = Join-Path $GitDir "hooks"
+    $GitDir = Join-Path $ProjectRoot ".git"
+    $SourceHooks = Join-Path $ProjectRoot "scripts\git-hooks"
+    $TargetHooks = Join-Path $GitDir "hooks"
 
-if (-not (Test-Path $GitDir)) {
-    Write-Warning ".git não encontrado."
-    Write-Warning "Este projeto ainda não é um repositório Git."
-    Write-Warning "Execute 'git init' e rode novamente este script (init.ps1)."
-    return
-}
-
-if (-not (Test-Path $SourceHooksDir)) {
-    Write-Warning "Diretório de hooks não encontrado: $SourceHooksDir"
-    Write-Warning "Nenhum hook foi instalado."
-    return
-}
-
-if (-not (Test-Path $TargetHooksDir)) {
-    Write-Host "Criando diretório de hooks do Git..."
-    New-Item -ItemType Directory -Path $TargetHooksDir | Out-Null
-}
-
-# Copia hooks
-Get-ChildItem -Path $SourceHooksDir -File | ForEach-Object {
-    $TargetPath = Join-Path $TargetHooksDir $_.Name
-
-    if (Test-Path $TargetPath) {
-        Write-Host "Sobrescrevendo hook existente: $($_.Name)"
-    } else {
-        Write-Host "Instalando hook: $($_.Name)"
+    if (-not (Test-Path $GitDir)) {
+        Logger:Warn "Git repository not found"
+        return
     }
 
-    Copy-Item -Path $_.FullName -Destination $TargetPath -Force
-}
-
-# Tenta marcar hooks como executáveis (Git Bash / MSYS)
-$ChmodCommand = Get-Command chmod -ErrorAction SilentlyContinue
-
-if ($ChmodCommand) {
-    Write-Host "Marcando hooks como executáveis (chmod +x)..."
-
-    Get-ChildItem -Path $TargetHooksDir -File | ForEach-Object {
-        & chmod +x $_.FullName
+    if (-not (Test-Path $SourceHooks)) {
+        Logger:Warn "Git hooks directory not found"
+        return
     }
-} else {
-    Write-Host "chmod não disponível. Ignorando ajuste de permissão."
-    Write-Host "No Git for Windows, isso normalmente não é um problema."
+
+    if (-not (Test-Path $TargetHooks)) {
+        New-Item -ItemType Directory -Path $TargetHooks | Out-Null
+    }
+
+    Get-ChildItem $SourceHooks -File | ForEach-Object {
+
+        $target = Join-Path $TargetHooks $_.Name
+        Copy-Item $_.FullName $target -Force
+
+        $chmod = Get-Command chmod -ErrorAction SilentlyContinue
+        if ($chmod) {
+            & chmod +x $target
+        }
+    }
+
+    Logger:Info "Git hooks configured"
 }
 
-Write-Host "Git hooks configurados com sucesso."
+Git:SetupHooks
 
-Write-Host "Setup concluído com sucesso."
+Logger:Info "Setup completed successfully"
